@@ -1,0 +1,12 @@
+#
+
+*.user
+*.exe
+*.filters
+
+Debug
+Release
+DATA
+INPUT
+OUTPUT
+v16
