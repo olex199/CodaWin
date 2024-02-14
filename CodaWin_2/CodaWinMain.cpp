@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include <thread>
+
 #include <filesystem>
 
 #include <math.h>     /* gcc mf.c -o wa -lm  */
@@ -25,6 +27,9 @@
 #define TWOPI   (2.0*PI)
 # define numpts 30720000   /* ulimit -s unlimited */
 
+
+int fileProc(const std::wstring& fileW, const std::wstring& pathDir,
+             const bool bUsePBsqmi, const bool bScrPrint);
 void four1(float* data, int nn, int isign);
 void realft(float* data, int n, int isign);
 void convolution(float* y, float* c);
@@ -33,21 +38,25 @@ void calc_PBsq(float* y, float& PBsq);
 
 int main()
 {
-    errno_t err;
+    std::wstring pathDir;
 
-    std::string pathDir;
-
-    std::ifstream fsin;
+    std::wifstream fsin;
     fsin.open("mf.ini");
     if (fsin.is_open())
     {
         std::getline(fsin, pathDir);
         fsin.close();
-        std::cout << std::endl << "Folder: " << pathDir << std::endl << std::endl;
+        std::wcout << std::endl << "Folder: " << pathDir.c_str() << std::endl << std::endl;
     }
     else
     {
         std::cout << "open file mf.ini failed.";
+    }
+
+    if (!std::filesystem::exists(pathDir))
+    {
+        std::wcout << std::endl << "Folder: " << pathDir.c_str() << " doesn't exist." << std::endl;
+        return -1;
     }
 
     std::vector<std::wstring> files;
@@ -70,101 +79,152 @@ int main()
         //std::cout << entry.path() << std::endl;
     }
 
+    std::wstring dataDir{L"DATA"};
+    if (std::size_t found = pathDir.find_last_of(L"/\\"); found != std::string::npos)
+    {
+        dataDir = pathDir.substr(found + 1);
+        pathDir = pathDir.substr(0, found + 1);
+    }
+
     for (const auto& fileW : files)
     {
         std::wcout << fileW.c_str() << std::endl;
     }
     std::cout << std::endl << "------------------------------------------" << std::endl;
 
-    for (const auto& fileW : files)
+    printf("thresholdsq = %12.6e wav units\n", thresholdsq);
+    printf("fs = %i samples per second\n", fs);
+    printf("dt = %12.8e time step (seconds)\n", dt);
+    printf("N  = %i sample length for matched filter \n", N);
+    printf("N2 = %i sample overlap for matched filter\n", N2);
+    printf("fp = %i frequency of porpoise click (Hz) \n", fp);
+
+    printf("\n TP[65] = ");
+    for (int m = 0; m < 65; m++)
     {
-        SNDFILE* sf{ 0 };
-        SF_INFO info{ 0 };
-        int num_channels{ 0 };
-        int num{ 0 }, num_items{ 0 };
-        int* buf{ 0 };
-        int f{ 0 }, sr{ 0 }, c{ 0 };
-        int nr{ 0 };
+        printf("%12.8e, ", TP[m]);
+    }
+    printf("\n");
+    std::cout << std::endl << "------------------------------------------" << std::endl;
 
-        int num_reads = numpts / 512 - 1;
+    bool bUsePBsqmi{ false };
+    if (bUsePBsqmi)
+    {
+        printf("PBsqmin = %12.8f \n", PBsqmin);
+    }
+    else
+    {
+        printf("PBmin = %12.8f \n", PBmin);
+    }
 
-        FILE* fpout{ 0 };
+    /*for (const auto& fileW : files)
+    {
+        fileProc(fileW, pathDir, bUsePBsqmi, true);
+    }*/
 
-        int   raw_data[1024]{0};
-        float y[1024]{ 0 };       /* data (normalized) */
-        float yt[1024]{ 0 };      /* fourier transform */
-        float ymean{ 0 };
-        float cenvsq[1024]{ 0 };    /* envelope of the matched filter */
-        float cmaxsq{ 0 }, cmax{ 0 }, cmaxdB{ 0 }, cms{ 0 }, PB{ 0 }, PBsq{ 0 };
-        int   k{ 0 };
-        int end_number = 0;    /* last position that has been read in the wav file */
-
-        int m{ 0 }, mm{ 0 };
-        printf("thresholdsq = %12.6e wav units\n", thresholdsq);
-        printf("fs = %i samples per second\n", fs);
-        printf("dt = %12.8e time step (seconds)\n", dt);
-        printf("N  = %i sample length for matched filter \n", N);
-        printf("N2 = %i sample overlap for matched filter\n", N2);
-        printf("fp = %i frequency of porpoise click (Hz) \n", fp);
-
-        printf("\n TP[65] = ");
-        for (m = 0; m < 65; m++) { printf("%12.8e, ", TP[m]); }
-        printf("\n");
-
-        bool bUsePBsqmi{ false };
-        if (bUsePBsqmi)
+    const int step{3};
+    std::vector<std::thread> vthreads(step);
+    for(int i = 0; i < files.size(); i += step)
+    {
+        for(int j = 0; j < step && i + j < files.size(); j++)
         {
-            printf("PBsqmin = %12.8f \n", PBsqmin);
+            vthreads[j] = std::thread(fileProc, files[i + j], pathDir, bUsePBsqmi, false);
         }
-        else
+        for (int j = 0; j < step && i + j < files.size(); j++)
         {
-            printf("PBmin = %12.8f \n", PBmin);
+            if(vthreads[j].joinable())
+                vthreads[j].join();
         }
+    }
 
+    return 0;
+}
+
+int fileProc(const std::wstring &fileW, const std::wstring& pathDir,
+             const bool bUsePBsqmi, const bool bScrPrint)
+{
+    SNDFILE* sf{ 0 };
+    SF_INFO info{ 0 };
+    int num_channels{ 0 };
+    int num{ 0 }, num_items{ 0 };
+    int* buf{ 0 };
+    int f{ 0 }, sr{ 0 }, c{ 0 };
+    int nr{ 0 };
+
+    int num_reads = numpts / 512 - 1;
+
+    FILE* fpout{ nullptr };
+
+    int   raw_data[1024]{ 0 };
+    float y[1024]{ 0 };       /* data (normalized) */
+    float yt[1024]{ 0 };      /* fourier transform */
+    float ymean{ 0 };
+    float cenvsq[1024]{ 0 };    /* envelope of the matched filter */
+    float cmaxsq{ 0 }, cmax{ 0 }, cmaxdB{ 0 }, cms{ 0 }, PB{ 0 }, PBsq{ 0 };
+    int k{ 0 };
+    int end_number = 0;    /* last position that has been read in the wav file */
+
+    if (bScrPrint)
+    {
         /* printf("\n       HH[2048] = \n");
             printf("2*m      real       imaginary \n");
             for (m=0; m<1024; m++){
             printf(" %i  %12.8e  %12.8e  \n",2*m,HH[2*m],HH[2*m+1]);
-            }    */
+            }*/
 
         std::cout << std::endl << "------------------------------------------" << std::endl;
 
         printf("\nSearch %ls for porpoise clicks.\n\n", fileW.c_str());
+    }
 
-        std::string fileN(fileW.begin(), fileW.end());
-        std::string directory_file{ "DATA/" + fileN };
-        std::string fout{ fileN };
-        if (std::size_t found = fileN.find_last_of('.'); found != std::string::npos)
-        {
-            fout = fileN.substr(0, found);
-        }
-        std::string directory_out{ "OUTPUT/" + fout + ".matches"};
+    std::wstring fileN{ fileW };
+    std::wstring directory_file{ pathDir + L"DATA/" + fileN };
+    std::wstring fout{ fileN };
+    if (std::size_t found = fileN.find_last_of('.'); found != std::string::npos)
+    {
+        fout = fileN.substr(0, found);
+    }
+    std::wstring directory_out{ pathDir + L"OUTPUT/" + fout + L".matches" };
 
-        std::cout << directory_file << std::endl;
-        std::cout << directory_out << std::endl << std::endl;
+    if (bScrPrint)
+    {
+        std::wcout << directory_file << std::endl;
+        std::wcout << directory_out << std::endl << std::endl;
+    }
 
-
-        /* Open the WAV file. */
-        info.format = 0;
-        /*  sf = sf_open("file.wav",SFM_READ,&info); */
-        /* SFM_READ  for read only mode, SFM_WRITE for write only, SFM_RDWR */
-        sf = sf_open(directory_file.c_str(), SFM_READ, &info);
-        if (sf == NULL) { printf("Failed to open the file.\n"); exit(-1); }
-        /* Print some of the info, and figure out how much data to read. */
-        f = info.frames;
-        sr = info.samplerate;
-        c = info.channels;
+    /* Open the WAV file. */
+    info.format = 0;
+    /*  sf = sf_open("file.wav",SFM_READ,&info); */
+    /* SFM_READ  for read only mode, SFM_WRITE for write only, SFM_RDWR */
+    std::string directory_fileS(directory_file.begin(), directory_file.end());
+    sf = sf_open(directory_fileS.c_str(), SFM_READ, &info);
+    if (sf == NULL)
+    {
+        printf("Failed to open the file.\n"); exit(-1);
+    }
+    /* Print some of the info, and figure out how much data to read. */
+    f = info.frames;
+    sr = info.samplerate;
+    c = info.channels;
+    if (bScrPrint)
+    {
         printf("frames=%d\n", f);
         printf("samplerate=%d\n", sr);
         printf("channels=%d\n", c);
-        num_items = f * c;
+    }
+    num_items = f * c;
+    if (bScrPrint)
+    {
         printf("num_items=%d\n", num_items);
+    }
 
-        /* Allocate space for the data to be read, then read it. */
-        /*    buf = (int *) malloc(num_items*sizeof(int));
-        num = sf_read_int(sf,buf,num_items); */
-        num = sf_read_int(sf, raw_data, 512);
-        end_number = 512;
+    /* Allocate space for the data to be read, then read it. */
+    /*    buf = (int *) malloc(num_items*sizeof(int));
+    num = sf_read_int(sf,buf,num_items); */
+    num = sf_read_int(sf, raw_data, 512);
+    end_number = 512;
+    if (bScrPrint)
+    {
         printf("------------------------------------------------- \n");
         printf("Read %d items, should equal %d\n", num, end_number);
         printf("raw_dat 0: %d \n", raw_data[0]);
@@ -172,88 +232,119 @@ int main()
         printf("raw_dat 510: %d \n", raw_data[510]);
         printf("raw_dat 511: %d \n", raw_data[511]);
         printf("------------------------------------------------- \n");
+    }
 
-        if ((err = fopen_s(&fpout, directory_out.c_str(), "w")) == 0) {
-            printf("\nOpened %s in mode w\n", directory_out.c_str());
+    errno_t err;
+    if ((err = _wfopen_s(&fpout, directory_out.c_str(), L"w")) == 0)
+    {
+        if (bScrPrint)
+        {
+            printf("\nOpened %ls in mode w\n", directory_out.c_str());
         }
-        else {
-            printf("\nFailed to open %s in mode w\n", directory_out.c_str());
-            return 0;
-        }
-        fprintf(fpout, "%% mf.c run on %s \n", directory_file.c_str());
+    }
+    else
+    {
+        printf("\nFailed to open %ls in mode w\n", directory_out.c_str());
+        return -1;
+    }
+
+    if (nullptr != fpout)
+    {
+        fprintf(fpout, "%% mf.c run on %ls \n", directory_file.c_str());
         fprintf(fpout, "%% point-position  time-seconds  convolution  PB \n");
+    }
 
-        num_reads = num_items / 512;
+    num_reads = num_items / 512;
+    if (bScrPrint)
+    {
         printf("num_reads: %d\n", num_reads);
+    }
 
-        for (nr = 1; nr <= num_reads; nr++) {
-            num = sf_read_int(sf, raw_data + 512, 512);
-            end_number = end_number + 512;
-            /*      printf("Read another %d items, end_number %d\n",num,end_number); */
-            for (m = 0; m < N; m++) { y[m] = raw_data[m] / 2147483648.; }
-            /*      for (m=0; m<256; m++) { y[m]=raw_data[m]/32768.; } */
-            /*      printf("N = %d \n",N);
-                    printf("y[0]=%e\n",y[0]);
-                    printf("y[255]=%e\n",y[255]); */
+    for (nr = 1; nr <= num_reads; nr++) {
+        num = sf_read_int(sf, raw_data + 512, 512);
+        end_number = end_number + 512;
+        /*      printf("Read another %d items, end_number %d\n",num,end_number); */
+        for (int m = 0; m < N; m++) { y[m] = raw_data[m] / 2147483648.; }
+        /*      for (m=0; m<256; m++) { y[m]=raw_data[m]/32768.; } */
+        /*      printf("N = %d \n",N);
+                printf("y[0]=%e\n",y[0]);
+                printf("y[255]=%e\n",y[255]); */
 
 
-            ymean = 0.;
-            for (m = 0; m < N; m++) { yt[m] = y[m]; ymean = ymean + y[m]; }
-            ymean = ymean / N;
-            for (m = 0; m < N; m++) { yt[m] = yt[m] - ymean; }   /* extract the mean */
-            realft(yt - 1, N2, 1);  /* yt-1 moves pointer 1 position to the left */
-            convolution(yt, cenvsq);
+        ymean = 0.;
+        for (int m = 0; m < N; m++) { yt[m] = y[m]; ymean = ymean + y[m]; }
+        ymean = ymean / N;
+        for (int m = 0; m < N; m++) { yt[m] = yt[m] - ymean; }   /* extract the mean */
+        realft(yt - 1, N2, 1);  /* yt-1 moves pointer 1 position to the left */
+        convolution(yt, cenvsq);
 
-            cmaxsq = cenvsq[256]; k = 256;
-            for (m = 256; m < N - 256; m++) {
-                if (cenvsq[m] > cmaxsq) {
-                    cmaxsq = cenvsq[m];
-                    k = m;
-                }
+        cmaxsq = cenvsq[256]; k = 256;
+        for (int m = 256; m < N - 256; m++) {
+            if (cenvsq[m] > cmaxsq) {
+                cmaxsq = cenvsq[m];
+                k = m;
             }
-            cms = 0.;
-            /*      mm=0;
-                    for (m=0; m<k-34; m++){ cms=cms+cenvsq[m]; mm=mm+1; }
-                    for (m=k+33; m<N-100; m++){ cms=cms+cenvsq[m]; mm=mm+1; }
-                    printf("mm=%d should be 857\n",mm);                        */
-            for (m = 0; m < k - 34; m++) { cms = cms + cenvsq[m]; }
-            for (m = k + 33; m < N - 100; m++) { cms = cms + cenvsq[m]; }
-            cms = cms / 857;                  /* mean square */
+        }
+        cms = 0.;
+        /*      mm=0;
+                for (m=0; m<k-34; m++){ cms=cms+cenvsq[m]; mm=mm+1; }
+                for (m=k+33; m<N-100; m++){ cms=cms+cenvsq[m]; mm=mm+1; }
+                printf("mm=%d should be 857\n",mm);                        */
+        for (int m = 0; m < k - 34; m++) { cms = cms + cenvsq[m]; }
+        for (int m = k + 33; m < N - 100; m++) { cms = cms + cenvsq[m]; }
+        cms = cms / 857;                  /* mean square */
 
-            if (bUsePBsqmi)
-            {
-                if (cmaxsq > 100 * cms && cmaxsq > thresholdsq) {
-                    calc_PBsq(y + k - 64, PBsq);
-                    if (PBsq > PBsqmin) {
-                        m = end_number - 1023 + k;
-                        cmax = sqrt(cmaxsq);
-                        cmaxdB = 20 * log10(3 * cmax) + 169; /* convert wav to dB */
-                        fprintf(fpout, "%12d %15.8f %8.1f %8.2f \n", m, m * dt, cmaxdB, PBsq);
+        if (bUsePBsqmi)
+        {
+            if (cmaxsq > 100 * cms && cmaxsq > thresholdsq) {
+                calc_PBsq(y + k - 64, PBsq);
+                if (PBsq > PBsqmin) {
+                    int m = end_number - 1023 + k;
+                    cmax = sqrt(cmaxsq);
+                    cmaxdB = 20 * log10(3 * cmax) + 169; /* convert wav to dB */
+                    fprintf(fpout, "%12d %15.8f %8.1f %8.2f \n", m, m * dt, cmaxdB, PBsq);
+                    if (bScrPrint)
+                    {
                         printf("%10d %12d %15.8f %8.1f %8.2f \n", nr, m, m * dt, cmaxdB, PBsq);
                     }
                 }
             }
-            else
-            {
-                if (cmaxsq > 100 * cms && cmaxsq > thresholdsq) {
-                    calc_PB(y + k - 64, PB);
-                    if (PB > PBmin) {
-                        m = end_number - 1023 + k;
-                        cmax = sqrt(cmaxsq);
-                        cmaxdB = 20 * log10(3 * cmax) + 169;
-                        fprintf(fpout, "%12d %15.8f %8.1f %8.2f \n", m, m * dt, cmaxdB, PB);
+        }
+        else
+        {
+            if (cmaxsq > 100 * cms && cmaxsq > thresholdsq) {
+                calc_PB(y + k - 64, PB);
+                if (PB > PBmin) {
+                    int m = end_number - 1023 + k;
+                    cmax = sqrt(cmaxsq);
+                    cmaxdB = 20 * log10(3 * cmax) + 169;
+                    fprintf(fpout, "%12d %15.8f %8.1f %8.2f \n", m, m * dt, cmaxdB, PB);
+                    if (bScrPrint)
+                    {
                         printf("%10d %12d %15.8f %8.1f %8.2f \n", nr, m, m * dt, cmaxdB, PB);
                     }
                 }
             }
+        }
 
-              /*  shift raw data to accomodate the next 512 points */
-            for (m = 0; m < 512; m++) { raw_data[m] = raw_data[512 + m]; }
-        }         /* end of nr loop that reads the data file */
+        /*  shift raw data to accomodate the next 512 points */
+        for (int m = 0; m < 512; m++) { raw_data[m] = raw_data[512 + m]; }
+    }         /* end of nr loop that reads the data file */
 
+    if (bScrPrint)
+    {
         printf("end_number %d\n", end_number);
-        fclose(fpout); printf("\nClosed %s \n", directory_out.c_str());
+    }
 
+    if (nullptr != fpout)
+    {
+        fclose(fpout);
+    }
+
+    printf("\nClosed %ls \n", directory_out.c_str());
+
+    if (bScrPrint)
+    {
         printf("------------------------------------------------- \n");
         printf("raw_dat 0: %d \n", raw_data[0]);
         printf("raw_dat 1: %d \n", raw_data[1]);
@@ -261,8 +352,6 @@ int main()
         printf("raw_dat 511: %d \n", raw_data[511]);
         printf("------------------------------------------------- \n");
     }
-
-    return 0;
 }
 
 void calc_PB(float *y, float &PB)
