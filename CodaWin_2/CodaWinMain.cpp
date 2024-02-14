@@ -15,8 +15,11 @@
 #include <math.h>     /* gcc mf.c -o wa -lm  */
 #include <string.h>   /* gcc -O3 mf.c -o wa -lm  */
 
-
+#ifdef _WIN64
+#pragma comment(lib, "sndfile.lib")
+#else
 #pragma comment(lib, "libsndfile-1.lib")
+#endif
 
 #include "sndfile.h"  /* gcc -O3 mf.c -o wa -lm -lsndfile */ 
 #include "const4mfsq.h"  /* gcc -O3 mfsq.c const4mfsq.h -o wa -lm -lsndfile  */
@@ -29,7 +32,7 @@
 
 
 int fileProc(const std::wstring& fileW, const std::wstring& pathDir,
-             const bool bUsePBsqmi, const bool bScrPrint);
+             const bool bUsePBsqmi, const bool bScrPrint, const unsigned int ncount);
 void four1(float* data, int nn, int isign);
 void realft(float* data, int n, int isign);
 void convolution(float* y, float* c);
@@ -85,10 +88,15 @@ int main()
         dataDir = pathDir.substr(found + 1);
         pathDir = pathDir.substr(0, found + 1);
     }
+    if (!std::filesystem::exists(pathDir + L"OUTPUT"))
+    {
+        std::filesystem::create_directory(pathDir + L"OUTPUT");
+    }
 
+    unsigned int fcount{ 0 };
     for (const auto& fileW : files)
     {
-        std::wcout << fileW.c_str() << std::endl;
+        std::wcout << std::to_string(++fcount).c_str() << ". " << fileW.c_str() << std::endl;
     }
     std::cout << std::endl << "------------------------------------------" << std::endl;
 
@@ -122,15 +130,15 @@ int main()
         fileProc(fileW, pathDir, bUsePBsqmi, true);
     }*/
 
-    const int step{3};
-    std::vector<std::thread> vthreads(step);
-    for(int i = 0; i < files.size(); i += step)
+    unsigned int nthreads = std::thread::hardware_concurrency();
+    std::vector<std::thread> vthreads(nthreads);
+    for(long long int i = 0; i < files.size(); i += nthreads)
     {
-        for(int j = 0; j < step && i + j < files.size(); j++)
+        for(long long int j = 0; j < nthreads && i + j < files.size(); j++)
         {
-            vthreads[j] = std::thread(fileProc, files[i + j], pathDir, bUsePBsqmi, false);
+            vthreads[j] = std::thread(fileProc, files[i + j], pathDir, bUsePBsqmi, false, i + j + 1);
         }
-        for (int j = 0; j < step && i + j < files.size(); j++)
+        for (long long int j = 0; j < nthreads && i + j < files.size(); j++)
         {
             if(vthreads[j].joinable())
                 vthreads[j].join();
@@ -141,7 +149,7 @@ int main()
 }
 
 int fileProc(const std::wstring &fileW, const std::wstring& pathDir,
-             const bool bUsePBsqmi, const bool bScrPrint)
+             const bool bUsePBsqmi, const bool bScrPrint, const unsigned int ncount)
 {
     SNDFILE* sf{ 0 };
     SF_INFO info{ 0 };
@@ -166,15 +174,13 @@ int fileProc(const std::wstring &fileW, const std::wstring& pathDir,
 
     if (bScrPrint)
     {
-        /* printf("\n       HH[2048] = \n");
-            printf("2*m      real       imaginary \n");
-            for (m=0; m<1024; m++){
+        /*printf("\n       HH[2048] = \n");
+        printf("2*m      real       imaginary \n");
+        for (m=0; m<1024; m++){
             printf(" %i  %12.8e  %12.8e  \n",2*m,HH[2*m],HH[2*m+1]);
-            }*/
+        }*/
 
         std::cout << std::endl << "------------------------------------------" << std::endl;
-
-        printf("\nSearch %ls for porpoise clicks.\n\n", fileW.c_str());
     }
 
     std::wstring fileN{ fileW };
@@ -253,6 +259,8 @@ int fileProc(const std::wstring &fileW, const std::wstring& pathDir,
         fprintf(fpout, "%% mf.c run on %ls \n", directory_file.c_str());
         fprintf(fpout, "%% point-position  time-seconds  convolution  PB \n");
     }
+
+    printf("\n %5d. Search %ls for porpoise clicks.\n", ncount, fileW.c_str());
 
     num_reads = num_items / 512;
     if (bScrPrint)
